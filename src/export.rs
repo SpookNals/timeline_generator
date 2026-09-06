@@ -9,15 +9,41 @@ use imageproc::drawing::{draw_line_segment_mut, draw_text_mut, text_size};
 use imageproc::rect::Rect as ImgRect;
 use std::path::Path;
 
-/// Common Windows fonts, tried in order. This app targets the user's own
-/// desktop and reads the font directly from the OS at runtime rather than
-/// bundling one, so no font file needs to be shipped with the project.
+/// Common system fonts for the current OS, tried in order. This app reads
+/// the font directly from the OS at runtime rather than bundling one, so no
+/// font file needs to be shipped with (or have its license checked for)
+/// the project - the tradeoff is that this list has to know where each OS
+/// tends to keep its standard fonts.
+#[cfg(target_os = "windows")]
 const FONT_CANDIDATES: &[&str] = &[
     r"C:\Windows\Fonts\segoeui.ttf",
     r"C:\Windows\Fonts\arial.ttf",
     r"C:\Windows\Fonts\calibri.ttf",
     r"C:\Windows\Fonts\tahoma.ttf",
 ];
+
+#[cfg(target_os = "macos")]
+const FONT_CANDIDATES: &[&str] = &[
+    "/System/Library/Fonts/Supplemental/Arial.ttf",
+    "/System/Library/Fonts/Supplemental/Verdana.ttf",
+    "/System/Library/Fonts/Supplemental/Tahoma.ttf",
+    "/System/Library/Fonts/Supplemental/Times New Roman.ttf",
+    "/Library/Fonts/Arial.ttf",
+    "/Library/Fonts/Verdana.ttf",
+];
+
+#[cfg(target_os = "linux")]
+const FONT_CANDIDATES: &[&str] = &[
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
+    "/usr/share/fonts/liberation-sans/LiberationSans-Regular.ttf",
+    "/usr/share/fonts/TTF/DejaVuSans.ttf",
+    "/usr/share/fonts/noto/NotoSans-Regular.ttf",
+];
+
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+const FONT_CANDIDATES: &[&str] = &[];
 
 fn load_font() -> Result<FontArc, String> {
     for path in FONT_CANDIDATES {
@@ -27,7 +53,10 @@ fn load_font() -> Result<FontArc, String> {
             }
         }
     }
-    Err("Could not find a font on this system (Segoe UI, Arial, Calibri, Tahoma).".to_owned())
+    Err(format!(
+        "Could not find a system font to export with. Tried: {}",
+        FONT_CANDIDATES.join(", ")
+    ))
 }
 
 fn to_rgba(color: Color32) -> Rgba<u8> {
