@@ -1,14 +1,11 @@
 use crate::model::Timeline;
 use crate::render::{
-    compute_logical_size, render_timeline, Canvas, Layout, TextAnchor, EXPORT_HEIGHT,
-    LOGICAL_HEIGHT,
+    compute_logical_size, render_timeline, Canvas, Layout, TextAnchor, EXPORT_SCALE,
 };
 use ab_glyph::{FontArc, PxScale};
 use egui::{Color32, Pos2, Rect, Vec2};
 use image::{Rgba, RgbaImage};
-use imageproc::drawing::{
-    draw_filled_circle_mut, draw_filled_rect_mut, draw_line_segment_mut, draw_text_mut, text_size,
-};
+use imageproc::drawing::{draw_line_segment_mut, draw_text_mut, text_size};
 use imageproc::rect::Rect as ImgRect;
 use std::path::Path;
 
@@ -35,6 +32,57 @@ fn load_font() -> Result<FontArc, String> {
 
 fn to_rgba(color: Color32) -> Rgba<u8> {
     Rgba([color.r(), color.g(), color.b(), color.a()])
+}
+
+/// Whether a point at local pixel coordinates `(x, y)` within a `w`x`h` box
+/// falls inside that box's rounded-rect shape (radius `r`), via the
+/// standard nearest-corner-circle test.
+fn inside_rounded_rect(x: f32, y: f32, w: f32, h: f32, r: f32) -> bool {
+    if r <= 0.0 {
+        return true;
+    }
+    let dx = if x < r {
+        r - x
+    } else if x > w - r {
+        x - (w - r)
+    } else {
+        0.0
+    };
+    let dy = if y < r {
+        r - y
+    } else if y > h - r {
+        y - (h - r)
+    } else {
+        0.0
+    };
+    dx * dx + dy * dy <= r * r
+}
+
+/// Paints `color` onto pixel `(x, y)`, alpha-compositing over the existing
+/// pixel when `color` is translucent (`imageproc`'s draw helpers overwrite
+/// rather than blend, which would break the shadow/highlight glass effect).
+fn blend_pixel(image: &mut RgbaImage, x: u32, y: u32, color: Color32) {
+    let a = color.a();
+    if a == 0 {
+        return;
+    }
+    if a == 255 {
+        image.put_pixel(x, y, to_rgba(color));
+        return;
+    }
+    let dst = *image.get_pixel(x, y);
+    let af = a as f32 / 255.0;
+    let mix = |s: u8, d: u8| -> u8 { (s as f32 * af + d as f32 * (1.0 - af)).round() as u8 };
+    image.put_pixel(
+        x,
+        y,
+        Rgba([
+            mix(color.r(), dst[0]),
+            mix(color.g(), dst[1]),
+            mix(color.b(), dst[2]),
+            255,
+        ]),
+    );
 }
 
 struct ImageCanvas {
@@ -66,33 +114,29 @@ impl Canvas for ImageCanvas {
 
     fn fill_rounded_rect(&mut self, rect: Rect, radius: f32, color: Color32) {
         let r = self.map_rect(rect);
-        let pixel = to_rgba(color);
-        let radius_px = ((radius * self.scale).max(0.0) as i32)
-            .min(r.width() as i32 / 2)
-            .min(r.height() as i32 / 2);
+        let (x0, y0, w, h) = (r.left(), r.top(), r.width() as i32, r.height() as i32);
+        let radius_px = (radius * self.scale)
+            .max(0.0)
+            .min(w as f32 / 2.0)
+            .min(h as f32 / 2.0);
+        let (img_w, img_h) = self.image.dimensions();
 
-        if radius_px <= 0 {
-            draw_filled_rect_mut(&mut self.image, r, pixel);
-            return;
-        }
-
-        let (x, y, w, h) = (r.left(), r.top(), r.width() as i32, r.height() as i32);
-
-        if h > 2 * radius_px {
-            let band = ImgRect::at(x, y + radius_px).of_size(w as u32, (h - 2 * radius_px) as u32);
-            draw_filled_rect_mut(&mut self.image, band, pixel);
-        }
-        if w > 2 * radius_px {
-            let band = ImgRect::at(x + radius_px, y).of_size((w - 2 * radius_px) as u32, h as u32);
-            draw_filled_rect_mut(&mut self.image, band, pixel);
-        }
-        for (cx, cy) in [
-            (x + radius_px, y + radius_px),
-            (x + w - radius_px - 1, y + radius_px),
-            (x + radius_px, y + h - radius_px - 1),
-            (x + w - radius_px - 1, y + h - radius_px - 1),
-        ] {
-            draw_filled_circle_mut(&mut self.image, (cx, cy), radius_px, pixel);
+        for dy in 0..h {
+            let py = y0 + dy;
+            if py < 0 || py as u32 >= img_h {
+                continue;
+            }
+            for dx in 0..w {
+                let px = x0 + dx;
+                if px < 0 || px as u32 >= img_w {
+                    continue;
+                }
+                if !inside_rounded_rect(dx as f32 + 0.5, dy as f32 + 0.5, w as f32, h as f32, radius_px)
+                {
+                    continue;
+                }
+                blend_pixel(&mut self.image, px as u32, py as u32, color);
+            }
         }
     }
 
@@ -134,14 +178,15 @@ impl Canvas for ImageCanvas {
     }
 }
 
-/// Renders `timeline` at a fixed high resolution and writes it to `path` as
-/// a PNG, matching the live preview exactly (same shared render function,
-/// just scaled up).
+/// Renders `timeline` at a fixed pixels-per-logical-unit resolution and
+/// writes it to `path` as a PNG, matching the live preview exactly (same
+/// shared render function, just scaled up). The image grows taller for
+/// longer timelines rather than being squeezed into a fixed height.
 pub fn export_png(timeline: &Timeline, path: &Path) -> Result<(), String> {
     let font = load_font()?;
     let layout = Layout::default();
     let logical_size = compute_logical_size(timeline, &layout);
-    let scale = EXPORT_HEIGHT / LOGICAL_HEIGHT;
+    let scale = EXPORT_SCALE;
     let pixel_size = logical_size * scale;
 
     let image = RgbaImage::from_pixel(

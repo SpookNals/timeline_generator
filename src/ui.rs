@@ -1,8 +1,9 @@
 use crate::export;
-use crate::model::{Timeline, TimelineBlock};
-use crate::render::{
-    compute_logical_size, render_timeline, Canvas, Layout, TextAnchor, LOGICAL_HEIGHT,
+use crate::model::{
+    format_year_month, fraction_from_year_month, year_month_from_fraction, Timeline,
+    TimelineBlock,
 };
+use crate::render::{compute_logical_size, render_timeline, Canvas, Layout, TextAnchor};
 use eframe::egui;
 use egui::{Color32, Pos2, Rect, Vec2};
 use std::path::PathBuf;
@@ -80,23 +81,31 @@ impl<'a> Canvas for EguiCanvas<'a> {
 /// The editable fields for adding or updating a block. Kept separate from
 /// `TimelineBlock` so the subtitle can be a plain (possibly empty) string in
 /// the form, and so an in-progress edit doesn't mutate the real block until
-/// confirmed.
+/// confirmed. Start/end are edited as a (year, month) pair rather than a
+/// raw fractional year, so a block spanning e.g. just one month can be
+/// entered directly instead of having to guess a decimal fraction.
 struct BlockForm {
     title: String,
     subtitle: String,
-    start_year: f32,
-    end_year: f32,
+    start_year: i32,
+    start_month: u32,
+    end_year: i32,
+    end_month: u32,
     color: Color32,
 }
 
 impl Default for BlockForm {
     fn default() -> Self {
         let block = TimelineBlock::default();
+        let (start_year, start_month) = year_month_from_fraction(block.start_year);
+        let (end_year, end_month) = year_month_from_fraction(block.end_year);
         Self {
             title: block.title,
             subtitle: block.subtitle.unwrap_or_default(),
-            start_year: block.start_year,
-            end_year: block.end_year,
+            start_year,
+            start_month,
+            end_year,
+            end_month,
             color: block.color,
         }
     }
@@ -104,11 +113,15 @@ impl Default for BlockForm {
 
 impl BlockForm {
     fn from_block(block: &TimelineBlock) -> Self {
+        let (start_year, start_month) = year_month_from_fraction(block.start_year);
+        let (end_year, end_month) = year_month_from_fraction(block.end_year);
         Self {
             title: block.title.clone(),
             subtitle: block.subtitle.clone().unwrap_or_default(),
-            start_year: block.start_year,
-            end_year: block.end_year,
+            start_year,
+            start_month,
+            end_year,
+            end_month,
             color: block.color,
         }
     }
@@ -121,8 +134,8 @@ impl BlockForm {
             } else {
                 Some(self.subtitle.clone())
             },
-            start_year: self.start_year,
-            end_year: self.end_year,
+            start_year: fraction_from_year_month(self.start_year, self.start_month),
+            end_year: fraction_from_year_month(self.end_year, self.end_month),
             color: self.color,
         }
     }
@@ -255,8 +268,10 @@ impl App {
                     let block = &self.timeline.blocks[i];
                     let (r, g, b, _a) = block.color.to_tuple();
                     let label = format!(
-                        "{} ({:.0}-{:.0})",
-                        block.title, block.start_year, block.end_year
+                        "{} ({} - {})",
+                        block.title,
+                        format_year_month(block.start_year),
+                        format_year_month(block.end_year)
                     );
                     ui.horizontal(|ui| {
                         ui.colored_label(Color32::from_rgb(r, g, b), "⬤");
@@ -294,10 +309,16 @@ impl App {
             ui.text_edit_singleline(&mut self.form.subtitle);
         });
         ui.horizontal(|ui| {
-            ui.label("Start year:");
-            ui.add(egui::DragValue::new(&mut self.form.start_year).range(1900.0..=2200.0));
-            ui.label("End year:");
-            ui.add(egui::DragValue::new(&mut self.form.end_year).range(1900.0..=2200.0));
+            ui.label("Start:");
+            ui.add(egui::DragValue::new(&mut self.form.start_year).range(1900..=2200));
+            ui.label("month:");
+            ui.add(egui::DragValue::new(&mut self.form.start_month).range(1..=12));
+        });
+        ui.horizontal(|ui| {
+            ui.label("End:");
+            ui.add(egui::DragValue::new(&mut self.form.end_year).range(1900..=2200));
+            ui.label("month:");
+            ui.add(egui::DragValue::new(&mut self.form.end_month).range(1..=12));
         });
         ui.horizontal(|ui| {
             ui.label("Color:");
@@ -331,15 +352,21 @@ impl App {
     fn preview(&mut self, ui: &mut egui::Ui) {
         let layout = Layout::default();
         let logical_size = compute_logical_size(&self.timeline, &layout);
-        let available_height = ui.available_height().max(1.0);
-        let scale = available_height / LOGICAL_HEIGHT;
-        let display_size = Vec2::new(logical_size.x * scale, available_height);
+        let available_width = ui.available_width().max(1.0);
+        let scale = available_width / logical_size.x;
+        let display_size = logical_size * scale;
 
-        egui::ScrollArea::both().show(ui, |ui| {
-            let (response, painter) = ui.allocate_painter(display_size, egui::Sense::hover());
-            let mut canvas = EguiCanvas::new(&painter, response.rect.min, scale, logical_size);
-            render_timeline(&mut canvas, &self.timeline, &layout);
-        });
+        // The canvas height grows with the number of years the timeline
+        // covers, so a long timeline scrolls vertically instead of being
+        // squeezed to fit a fixed page height.
+        egui::ScrollArea::both()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                let (response, painter) =
+                    ui.allocate_painter(display_size, egui::Sense::hover());
+                let mut canvas = EguiCanvas::new(&painter, response.rect.min, scale, logical_size);
+                render_timeline(&mut canvas, &self.timeline, &layout);
+            });
     }
 }
 
