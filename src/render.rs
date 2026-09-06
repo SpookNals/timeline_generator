@@ -360,32 +360,58 @@ pub fn render_timeline(canvas: &mut dyn Canvas, timeline: &Timeline, layout: &La
     // so a label only ever moves away from its bar's actual position by the
     // small amount needed to avoid overlapping a neighboring label - never
     // by the bar's full length.
+    //
+    // Crucially, the packing order is each bar's actual vertical position
+    // (`cy`), never the label's own (content-height-dependent) desired top.
+    // Sorting by desired top instead would let a block with a taller label
+    // (e.g. one with a subtitle) jump ahead of a chronologically earlier
+    // neighbor whose bar sits just above it, flipping their label order
+    // relative to their bars' real order - and since each leader line runs
+    // from its own bar to its own label, that flip is exactly what makes
+    // two lines cross.
+    //
+    // When several bars share (near enough) the same `cy` - e.g. a handful
+    // of same-length stints that all start on the same date - they tie on
+    // that primary key, and the tie-break matters just as much: whichever
+    // one sits closest to the gutter (deepest lane) has the least run of
+    // horizontal distance to reach its label, so it gets the smallest push
+    // off its true position, while the one closest to the axis has the most
+    // room to spare and absorbs the largest push. Breaking ties the other
+    // way round is what produced an actual crossing here: the deep-lane bar
+    // would start out level with (or above) a shallower one but then have
+    // to cut across it to reach a label pushed further down.
     let mut label_top = vec![0.0f32; timeline.blocks.len()];
     for side in [Side::Right, Side::Left] {
-        let mut items: Vec<(usize, f32, f32)> = geoms
+        let mut items: Vec<(usize, f32, i32, f32, f32)> = geoms
             .iter()
             .enumerate()
             .filter(|(_, g)| g.side == side)
             .map(|(i, g)| {
                 let content_height = label_content_height(&timeline.blocks[i]);
                 let desired = g.cy - content_height / 2.0;
-                (i, desired, content_height)
+                let depth = placement[i].1 as i32;
+                (i, g.cy, depth, desired, content_height)
             })
             .collect();
-        items.sort_by(|a, b| a.1.total_cmp(&b.1));
+        items.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| b.2.cmp(&a.2)));
         let mut next_free = f32::MIN;
-        for (i, desired, height) in items {
+        for (i, _cy, _depth, desired, height) in items {
             let top = desired.max(next_free);
             label_top[i] = top;
             next_free = top + height + LABEL_GAP;
         }
     }
 
-    // Pass 1: a leader line per block, from the bar's own outer edge (not
-    // the axis) to its label's color bullet - a single straight line, only
-    // ever so slightly diagonal since labels rarely move far from their
-    // bar's own position. Drawn before the bars (pass 2) so bars paint over
-    // any further-out lane a line happens to cross.
+    // Pass 1: a leader line per block, from the bar's own outer edge out to
+    // its label's color bullet. The line stays flat at the bar's own true
+    // height for as long as it's still passing other lanes, and only turns
+    // toward the label's actual (possibly nudged) height once it's clear of
+    // every bar - a diagonal for that whole stretch would drift away from
+    // its own bar's height while still among other lanes, and could become
+    // visible crossing directly over a bar it has nothing to do with,
+    // instead of staying level with its own bar the way a "this is its
+    // time" line should. Drawn before the bars (pass 2) so bars paint over
+    // any further-out lane the flat stretch happens to cross.
     let leader_base = Color32::from_rgb(186, 191, 201);
     for (i, (block, geom)) in timeline.blocks.iter().zip(&geoms).enumerate() {
         let sign = match geom.side {
@@ -406,6 +432,20 @@ pub fn render_timeline(canvas: &mut dyn Canvas, timeline: &Timeline, layout: &La
 
         canvas.line(
             Pos2::new(bar_edge_x, geom.cy),
+            Pos2::new(gutter_x, geom.cy),
+            line_color,
+            1.5,
+        );
+        if (bullet_y - geom.cy).abs() > 0.5 {
+            canvas.line(
+                Pos2::new(gutter_x, geom.cy),
+                Pos2::new(gutter_x, bullet_y),
+                line_color,
+                1.5,
+            );
+        }
+        canvas.line(
+            Pos2::new(gutter_x, bullet_y),
             Pos2::new(bullet_x, bullet_y),
             line_color,
             1.5,
