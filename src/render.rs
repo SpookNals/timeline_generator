@@ -356,6 +356,10 @@ pub fn render_timeline(canvas: &mut dyn Canvas, timeline: &Timeline, layout: &La
     // of how their bars ended up overlapping across lanes (a plain "gap to
     // the previous item" rule breaks as soon as one block's span nests
     // inside another's, e.g. a one-month gig during a multi-year job).
+    // Labels start out centered on their own bar (not pinned to its top),
+    // so a label only ever moves away from its bar's actual position by the
+    // small amount needed to avoid overlapping a neighboring label - never
+    // by the bar's full length.
     let mut label_top = vec![0.0f32; timeline.blocks.len()];
     for side in [Side::Right, Side::Left] {
         let mut items: Vec<(usize, f32, f32)> = geoms
@@ -363,8 +367,9 @@ pub fn render_timeline(canvas: &mut dyn Canvas, timeline: &Timeline, layout: &La
             .enumerate()
             .filter(|(_, g)| g.side == side)
             .map(|(i, g)| {
-                let desired = g.rect.top().min(g.cy - TITLE_LINE / 2.0);
-                (i, desired, label_content_height(&timeline.blocks[i]))
+                let content_height = label_content_height(&timeline.blocks[i]);
+                let desired = g.cy - content_height / 2.0;
+                (i, desired, content_height)
             })
             .collect();
         items.sort_by(|a, b| a.1.total_cmp(&b.1));
@@ -376,11 +381,11 @@ pub fn render_timeline(canvas: &mut dyn Canvas, timeline: &Timeline, layout: &La
         }
     }
 
-    // Pass 1: leader lines, from the bar's own outer edge (not the axis) out
-    // to the gutter, jogging vertically if the label was nudged away from
-    // the bar's time position to avoid overlapping another label - drawn
-    // before the bars (pass 2) so bars paint over any further-out lane a
-    // line happens to cross.
+    // Pass 1: a leader line per block, from the bar's own outer edge (not
+    // the axis) to its label's color bullet - a single straight line, only
+    // ever so slightly diagonal since labels rarely move far from their
+    // bar's own position. Drawn before the bars (pass 2) so bars paint over
+    // any further-out lane a line happens to cross.
     let leader_base = Color32::from_rgb(186, 191, 201);
     for (i, (block, geom)) in timeline.blocks.iter().zip(&geoms).enumerate() {
         let sign = match geom.side {
@@ -401,20 +406,6 @@ pub fn render_timeline(canvas: &mut dyn Canvas, timeline: &Timeline, layout: &La
 
         canvas.line(
             Pos2::new(bar_edge_x, geom.cy),
-            Pos2::new(gutter_x, geom.cy),
-            line_color,
-            1.5,
-        );
-        if (bullet_y - geom.cy).abs() > 0.5 {
-            canvas.line(
-                Pos2::new(gutter_x, geom.cy),
-                Pos2::new(gutter_x, bullet_y),
-                line_color,
-                1.5,
-            );
-        }
-        canvas.line(
-            Pos2::new(gutter_x, bullet_y),
             Pos2::new(bullet_x, bullet_y),
             line_color,
             1.5,
