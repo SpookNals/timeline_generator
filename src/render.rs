@@ -1,4 +1,4 @@
-use crate::model::{format_year_month, Timeline, TimelineBlock};
+use crate::model::{Timeline, TimelineBlock, duration, format_year_month};
 use egui::{Color32, Pos2, Rect, Vec2};
 
 /// Logical height (in logical units) allotted per year of timeline span.
@@ -33,6 +33,13 @@ pub enum TextAnchor {
 /// itself never needs to know which one it is talking to.
 pub trait Canvas {
     fn logical_size(&self) -> Vec2;
+    fn begin_label(&mut self, _index: usize, _rect: Rect) {}
+    fn end_label(&mut self) {}
+    fn connector(&mut self, _index: usize, a: Pos2, b: Pos2, c: Pos2, d: Pos2, color: Color32) {
+        self.line(a, b, color, 1.5);
+        self.line(b, c, color, 1.5);
+        self.line(c, d, color, 1.5);
+    }
     fn fill_rounded_rect(&mut self, rect: Rect, radius: f32, color: Color32);
     fn line(&mut self, p1: Pos2, p2: Pos2, color: Color32, stroke_width: f32);
     fn text(&mut self, pos: Pos2, text: &str, size: f32, color: Color32, anchor: TextAnchor);
@@ -97,7 +104,11 @@ fn assign_placement(timeline: &Timeline) -> Vec<(Side, usize)> {
     let mut left_lane_ends: Vec<f32> = Vec::new();
 
     for (rank, idx) in order.into_iter().enumerate() {
-        let side = if rank % 2 == 0 { Side::Right } else { Side::Left };
+        let side = if rank % 2 == 0 {
+            Side::Right
+        } else {
+            Side::Left
+        };
         let lane_ends = match side {
             Side::Right => &mut right_lane_ends,
             Side::Left => &mut left_lane_ends,
@@ -146,7 +157,19 @@ pub fn compute_logical_size(timeline: &Timeline, layout: &Layout) -> Vec2 {
         + (left_lanes + right_lanes) * layout.lane_pitch;
 
     let span_years = (timeline.end_year - timeline.start_year).max(0.0);
-    let plot_height = (span_years * YEAR_HEIGHT).max(MIN_PLOT_HEIGHT);
+    let label_space: f32 = timeline
+        .blocks
+        .iter()
+        .map(|b| {
+            100.0
+                + b.description.as_ref().map_or(0.0, |s| {
+                    (s.chars().count() / 16 + s.lines().count()) as f32 * 18.0
+                })
+        })
+        .sum();
+    let plot_height = (span_years * YEAR_HEIGHT)
+        .max(MIN_PLOT_HEIGHT)
+        .max(label_space);
     let height = plot_height + layout.margin * 2.0;
 
     Vec2::new(width, height)
@@ -223,8 +246,46 @@ struct BlockGeom {
 
 /// Vertical space (in logical units) a block's label needs: title, a subtle
 /// date-range line, and (if present) the subtitle.
-fn label_content_height(block: &TimelineBlock) -> f32 {
-    TITLE_LINE + DATE_LINE + if block.subtitle.is_some() { SUBTITLE_LINE } else { 0.0 }
+fn description_lines(canvas: &dyn Canvas, block: &TimelineBlock, width: f32) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(text) = &block.description {
+        for paragraph in text.split('\n') {
+            let mut line = String::new();
+            for word in paragraph.split_whitespace() {
+                let candidate = if line.is_empty() {
+                    word.to_owned()
+                } else {
+                    format!("{line} {word}")
+                };
+                if canvas.text_width(&candidate, 13.0) <= width {
+                    line = candidate;
+                    continue;
+                }
+                if !line.is_empty() {
+                    lines.push(std::mem::take(&mut line));
+                }
+                for ch in word.chars() {
+                    let candidate = format!("{line}{ch}");
+                    if !line.is_empty() && canvas.text_width(&candidate, 13.0) > width {
+                        lines.push(std::mem::take(&mut line));
+                    }
+                    line.push(ch);
+                }
+            }
+            lines.push(line);
+        }
+    }
+    lines
+}
+fn label_content_height(block: &TimelineBlock, lines: usize) -> f32 {
+    TITLE_LINE
+        + DATE_LINE * 2.0
+        + if block.subtitle.is_some() {
+            SUBTITLE_LINE
+        } else {
+            0.0
+        }
+        + lines as f32 * 18.0
 }
 
 /// Draws `timeline` onto `canvas`. This is the single source of truth for
@@ -271,12 +332,9 @@ pub fn render_timeline(canvas: &mut dyn Canvas, timeline: &Timeline, layout: &La
 
     let plot_top = layout.margin;
     let plot_bottom = size.y - layout.margin;
-    let axis_x = layout.margin + layout.label_gutter + left_lanes * layout.lane_pitch
-        + layout.connector_gap;
-    let plot_rect = Rect::from_min_max(
-        Pos2::new(axis_x, plot_top),
-        Pos2::new(axis_x, plot_bottom),
-    );
+    let axis_x =
+        layout.margin + layout.label_gutter + left_lanes * layout.lane_pitch + layout.connector_gap;
+    let plot_rect = Rect::from_min_max(Pos2::new(axis_x, plot_top), Pos2::new(axis_x, plot_bottom));
 
     // The vertical axis, softened to a muted blue-gray rather than harsh
     // black/gray.
@@ -335,8 +393,8 @@ pub fn render_timeline(canvas: &mut dyn Canvas, timeline: &Timeline, layout: &La
             let (side, depth) = placement[i];
             let depth = depth as f32;
             let y_top = year_to_y(timeline, block.end_year, plot_rect);
-            let y_bottom = year_to_y(timeline, block.start_year, plot_rect)
-                .max(y_top + MIN_BAR_HEIGHT);
+            let y_bottom =
+                year_to_y(timeline, block.start_year, plot_rect).max(y_top + MIN_BAR_HEIGHT);
             let half = layout.bar_width / 2.0;
             let lane_center = match side {
                 Side::Right => axis_x + layout.connector_gap + depth * layout.lane_pitch + half,
@@ -380,6 +438,18 @@ pub fn render_timeline(canvas: &mut dyn Canvas, timeline: &Timeline, layout: &La
     // way round is what produced an actual crossing here: the deep-lane bar
     // would start out level with (or above) a shallower one but then have
     // to cut across it to reach a label pushed further down.
+    let label_width = layout.label_gutter - NUB_LEN - 8.0;
+    let descriptions: Vec<_> = timeline
+        .blocks
+        .iter()
+        .map(|b| description_lines(canvas, b, label_width))
+        .collect();
+    let heights: Vec<_> = timeline
+        .blocks
+        .iter()
+        .enumerate()
+        .map(|(i, b)| label_content_height(b, descriptions[i].len()))
+        .collect();
     let mut label_top = vec![0.0f32; timeline.blocks.len()];
     for side in [Side::Right, Side::Left] {
         let mut items: Vec<(usize, f32, i32, f32, f32)> = geoms
@@ -387,20 +457,45 @@ pub fn render_timeline(canvas: &mut dyn Canvas, timeline: &Timeline, layout: &La
             .enumerate()
             .filter(|(_, g)| g.side == side)
             .map(|(i, g)| {
-                let content_height = label_content_height(&timeline.blocks[i]);
+                let content_height = heights[i];
                 let desired = g.cy - content_height / 2.0;
                 let depth = placement[i].1 as i32;
                 (i, g.cy, depth, desired, content_height)
             })
             .collect();
         items.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| b.2.cmp(&a.2)));
-        let mut next_free = f32::MIN;
-        for (i, _cy, _depth, desired, height) in items {
+        let mut next_free = layout.margin;
+        for &(i, _cy, _depth, desired, height) in &items {
             let top = desired.max(next_free);
             label_top[i] = top;
             next_free = top + height + LABEL_GAP;
         }
+        // Pack back from the bottom, preserving space between automatic labels.
+        let mut bottom = size.y - layout.margin;
+        for &(i, _, _, _, height) in items.iter().rev() {
+            label_top[i] = label_top[i].min(bottom - height);
+            bottom = label_top[i] - LABEL_GAP;
+        }
     }
+    let label_rects: Vec<_> = timeline
+        .blocks
+        .iter()
+        .enumerate()
+        .map(|(i, b)| {
+            let default_x = match geoms[i].side {
+                Side::Right => right_gutter_x + NUB_LEN + 8.0,
+                Side::Left => left_gutter_x - NUB_LEN - 8.0 - label_width,
+            };
+            let [x, y] = b.label_position.unwrap_or([default_x, label_top[i]]);
+            Rect::from_min_size(
+                Pos2::new(
+                    x.clamp(8.0, (size.x - label_width - 8.0).max(8.0)),
+                    y.clamp(8.0, (size.y - heights[i] - 8.0).max(8.0)),
+                ),
+                Vec2::new(label_width, heights[i]),
+            )
+        })
+        .collect();
 
     // Pass 1: a leader line per block, from the bar's own outer edge out to
     // its label's color bullet. The line stays flat at the bar's own true
@@ -422,33 +517,23 @@ pub fn render_timeline(canvas: &mut dyn Canvas, timeline: &Timeline, layout: &La
             Side::Right => geom.rect.right(),
             Side::Left => geom.rect.left(),
         };
-        let gutter_x = match geom.side {
-            Side::Right => right_gutter_x,
-            Side::Left => left_gutter_x,
+        let label = label_rects[i];
+        let text_x = if geom.side == Side::Right {
+            label.left()
+        } else {
+            label.right()
         };
-        let bullet_y = label_top[i] + TITLE_LINE / 2.0;
-        let bullet_x = gutter_x + NUB_LEN * sign;
+        let bullet_x = text_x - 8.0 * sign;
+        let gutter_x = bullet_x - NUB_LEN * sign;
+        let bullet_y = label.top() + TITLE_LINE / 2.0;
         let line_color = lerp_color(leader_base, block.color, 0.35);
-
-        canvas.line(
+        canvas.connector(
+            i,
             Pos2::new(bar_edge_x, geom.cy),
             Pos2::new(gutter_x, geom.cy),
-            line_color,
-            1.5,
-        );
-        if (bullet_y - geom.cy).abs() > 0.5 {
-            canvas.line(
-                Pos2::new(gutter_x, geom.cy),
-                Pos2::new(gutter_x, bullet_y),
-                line_color,
-                1.5,
-            );
-        }
-        canvas.line(
             Pos2::new(gutter_x, bullet_y),
             Pos2::new(bullet_x, bullet_y),
             line_color,
-            1.5,
         );
     }
 
@@ -472,19 +557,16 @@ pub fn render_timeline(canvas: &mut dyn Canvas, timeline: &Timeline, layout: &La
             Side::Right => 1.0,
             Side::Left => -1.0,
         };
-        let (gutter_x, anchor) = match geom.side {
-            Side::Right => (right_gutter_x, TextAnchor::TopLeft),
-            Side::Left => (left_gutter_x, TextAnchor::TopRight),
+        let rect = label_rects[i];
+        let (text_x, anchor) = match geom.side {
+            Side::Right => (rect.left(), TextAnchor::TopLeft),
+            Side::Left => (rect.right(), TextAnchor::TopRight),
         };
-        let bullet_x = gutter_x + NUB_LEN * sign;
-        let text_x = bullet_x + 8.0 * sign;
-        let top = label_top[i];
+        let bullet_x = text_x - 8.0 * sign;
+        let top = rect.top();
         let bullet_y = top + TITLE_LINE / 2.0;
-
-        let max_label_width = match geom.side {
-            Side::Right => (size.x - layout.margin - text_x).max(0.0),
-            Side::Left => (text_x - layout.margin).max(0.0),
-        };
+        let max_label_width = label_width;
+        canvas.begin_label(i, rect);
 
         canvas.fill_rounded_rect(
             Rect::from_center_size(Pos2::new(bullet_x, bullet_y), Vec2::splat(8.0)),
@@ -512,12 +594,37 @@ pub fn render_timeline(canvas: &mut dyn Canvas, timeline: &Timeline, layout: &La
         if let Some(sub) = &block.subtitle {
             let sub_text = truncate_to_width(canvas, sub, 14.0, max_label_width);
             canvas.text(
-                Pos2::new(text_x, top + TITLE_LINE + DATE_LINE),
+                Pos2::new(text_x, top + TITLE_LINE + DATE_LINE * 2.0),
                 &sub_text,
                 14.0,
                 TEXT_GRAY,
                 anchor,
             );
         }
+        canvas.text(
+            Pos2::new(text_x, top + TITLE_LINE + DATE_LINE),
+            &duration(block.start_year, block.end_year),
+            12.0,
+            TEXT_GRAY,
+            anchor,
+        );
+        let description_top = top
+            + TITLE_LINE
+            + DATE_LINE * 2.0
+            + if block.subtitle.is_some() {
+                SUBTITLE_LINE
+            } else {
+                0.0
+            };
+        for (line_index, line) in descriptions[i].iter().enumerate() {
+            canvas.text(
+                Pos2::new(text_x, description_top + line_index as f32 * 18.0),
+                line,
+                13.0,
+                TEXT_GRAY,
+                anchor,
+            );
+        }
+        canvas.end_label();
     }
 }

@@ -45,7 +45,7 @@ const FONT_CANDIDATES: &[&str] = &[
 #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
 const FONT_CANDIDATES: &[&str] = &[];
 
-fn load_font() -> Result<FontArc, String> {
+pub(crate) fn load_font() -> Result<FontArc, String> {
     for path in FONT_CANDIDATES {
         if let Ok(bytes) = std::fs::read(path) {
             if let Ok(font) = FontArc::try_from_vec(bytes) {

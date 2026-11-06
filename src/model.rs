@@ -8,6 +8,11 @@ pub struct TimelineBlock {
     pub start_year: f32,
     pub end_year: f32,
     pub color: Color32,
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Top-left label position in logical canvas coordinates; None uses automatic layout.
+    #[serde(default)]
+    pub label_position: Option<[f32; 2]>,
 }
 
 impl Default for TimelineBlock {
@@ -15,6 +20,8 @@ impl Default for TimelineBlock {
         Self {
             title: "New block".to_owned(),
             subtitle: None,
+            description: None,
+            label_position: None,
             start_year: 2020.0,
             end_year: 2021.0,
             color: Color32::from_rgb(66, 133, 244),
@@ -67,4 +74,42 @@ impl Default for Timeline {
             blocks: Vec::new(),
         }
     }
+}
+
+impl Timeline {
+    pub fn include_periods(&mut self) {
+        for block in &self.blocks {
+            if block.start_year.is_finite() {
+                self.start_year = self.start_year.min(block.start_year.floor());
+            }
+            if block.end_year.is_finite() {
+                self.end_year = self.end_year.max(block.end_year.ceil());
+            }
+        }
+        if self.end_year == self.start_year {
+            self.end_year += 1.0;
+        }
+    }
+}
+
+pub fn duration(start: f32, end: f32) -> String {
+    let months = ((end - start) * 12.0).round().max(0.0) as u32;
+    let years = months / 12;
+    let remainder = months % 12;
+    let mut parts = Vec::new();
+    if years > 0 {
+        parts.push(format!(
+            "{} year{}",
+            years,
+            if years == 1 { "" } else { "s" }
+        ));
+    }
+    if remainder > 0 || years == 0 {
+        parts.push(format!(
+            "{} month{}",
+            remainder,
+            if remainder == 1 { "" } else { "s" }
+        ));
+    }
+    parts.join(" ")
 }
