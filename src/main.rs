@@ -4,6 +4,7 @@ mod export;
 mod model;
 mod render;
 mod svg;
+mod storage;
 
 fn main() {
     tauri::Builder::default()

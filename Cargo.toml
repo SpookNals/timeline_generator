@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+tempfile = "3.27.0"
 ab_glyph = "0.2.32"
 tauri = { version = "2", features = [] }
 egui = { version = "0.36.1", features = ["serde"] }

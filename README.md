@@ -43,7 +43,8 @@ Tauri configuration: https://v2.tauri.app/reference/config/
   steps). Double-click to edit. Reset label position restores automatic placement.
   Manually placed descriptions can overlap; their positions are saved and exported.
 - Click a period in the sidebar to edit or delete it.
-- Open/save existing JSON projects using the native file dialogs.
+- Open/save existing JSON projects using the native file dialogs. Failed opens retain
+  the current project; saves and PNG exports replace files only after a complete write.
 - Ctrl+S saves, Ctrl+Shift+S saves as, Ctrl+O opens a project.
 - Export PNG uses the existing Rust renderer at 2x logical resolution.
 - Zoom with the toolbar; clicking the percentage restores fit-to-width.
@@ -74,6 +75,8 @@ not compiled.
 cargo test
 cargo check
 node --check frontend/app.js
+node tests/close.test.cjs
+node tests/editor.test.cjs
 ```
 
 MIT; see LICENSE.

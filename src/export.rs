@@ -232,8 +232,8 @@ pub fn export_png(timeline: &Timeline, path: &Path) -> Result<(), String> {
 
     render_timeline(&mut canvas, timeline, &layout);
 
-    canvas
-        .image
-        .save(path)
-        .map_err(|e| format!("Failed to save PNG: {e}"))
+    crate::storage::replace_file(path, |file| {
+        canvas.image.write_to(file, image::ImageFormat::Png)
+            .map_err(|e| format!("Failed to save PNG: {e}"))
+    })
 }

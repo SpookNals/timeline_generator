@@ -5,7 +5,11 @@ use crate::{
     svg,
 };
 use serde::Serialize;
-use std::{path::PathBuf, sync::Mutex};
+use std::{
+    io::{Read, Write},
+    path::{Path, PathBuf},
+    sync::Mutex,
+};
 
 #[derive(Default)]
 pub struct ProjectPath(Mutex<Option<PathBuf>>);
@@ -13,6 +17,7 @@ pub struct ProjectPath(Mutex<Option<PathBuf>>);
 pub struct Opened {
     timeline: Timeline,
     name: String,
+    svg: String,
 }
 
 pub fn validate(t: &Timeline) -> Result<(), String> {
@@ -76,18 +81,32 @@ pub async fn open_project(state: tauri::State<'_, ProjectPath>) -> Result<Option
     else {
         return Ok(None);
     };
-    let bytes = std::fs::read(file.path()).map_err(|e| e.to_string())?;
+    load_project(file.path(), &state)
+}
+
+fn load_project(path: &Path, state: &ProjectPath) -> Result<Option<Opened>, String> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .map_err(|e| e.to_string())?
+        .take(2_000_001)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
     if bytes.len() > 2_000_000 {
         return Err("The project file is too large.".into());
     }
-    let mut timeline: Timeline =
+    let timeline: Timeline =
         serde_json::from_slice(&bytes).map_err(|e| format!("Invalid project: {e}"))?;
-    timeline.include_periods();
-    validate(&timeline)?;
-    *state.0.lock().map_err(|e| e.to_string())? = Some(file.path().to_owned());
+    // Prepare the complete preview before changing the active save destination.
+    let prepared = preview(timeline)?;
+    *state.0.lock().map_err(|e| e.to_string())? = Some(path.to_owned());
     Ok(Some(Opened {
-        timeline,
-        name: file.file_name(),
+        timeline: prepared.timeline,
+        svg: prepared.svg,
+        name: path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned(),
     }))
 }
 #[tauri::command]
@@ -110,10 +129,12 @@ pub async fn save_project(
         else {
             return Ok(None);
         };
-        file.path().with_extension("json")
+        file.path().to_owned()
     };
     let bytes = serde_json::to_vec_pretty(&timeline).map_err(|e| e.to_string())?;
-    std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+    crate::storage::replace_file(&path, |file| {
+        file.write_all(&bytes).map_err(|e| e.to_string())
+    })?;
     let name = path
         .file_name()
         .unwrap_or_default()
@@ -134,7 +155,7 @@ pub async fn export_image(mut timeline: Timeline) -> Result<bool, String> {
     else {
         return Ok(false);
     };
-    let path = file.path().with_extension("png");
+    let path = file.path().to_owned();
     tauri::async_runtime::spawn_blocking(move || export::export_png(&timeline, &path))
         .await
         .map_err(|e| e.to_string())??;
@@ -154,6 +175,32 @@ pub async fn confirm_discard() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn failed_open_preserves_save_destination() {
+        let directory = tempfile::tempdir().unwrap();
+        let previous = directory.path().join("previous.json");
+        let state = ProjectPath(Mutex::new(Some(previous.clone())));
+        let invalid = directory.path().join("invalid.json");
+        std::fs::write(&invalid, b"invalid json").unwrap();
+        assert!(load_project(&invalid, &state).is_err());
+        assert_eq!(*state.0.lock().unwrap(), Some(previous));
+        let valid = directory.path().join("valid.json");
+        std::fs::write(&valid, serde_json::to_vec(&Timeline::default()).unwrap()).unwrap();
+        let loaded = load_project(&valid, &state).unwrap().unwrap();
+        assert!(loaded.svg.contains("<svg"));
+        assert_eq!(*state.0.lock().unwrap(), Some(valid));
+    }
+    #[test]
+    fn png_encoding_does_not_depend_on_filename_extension() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("custom-name.data");
+        export::export_png(&Timeline::default(), &path).unwrap();
+        assert!(
+            std::fs::read(path)
+                .unwrap()
+                .starts_with(b"\x89PNG\r\n\x1a\n")
+        );
+    }
     #[test]
     fn preview_expands_both_ends_and_keeps_period_dates() {
         let mut t = Timeline::default();
